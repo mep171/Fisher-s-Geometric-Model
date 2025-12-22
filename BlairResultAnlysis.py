@@ -1,0 +1,274 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Fri Oct 10 14:25:12 2025
+
+@author: Meaghan Parks
+"""
+
+import jax.numpy as jnp
+import matplotlib.pyplot as plt
+import jax
+import numpy as np
+from jax import random
+from jax.scipy.optimize import minimize
+import math
+import jax.numpy as jnp
+import jaxopt 
+import pandas as pd
+import matplotlib.pyplot as plt
+MAX_REGRESS_ITER = 1E9
+#CONSTRAIN_ROTATION=True
+#D=2
+#C=13
+#M=18
+seed = 980
+
+key = random.PRNGKey(seed)
+plt.rcParams.update({'font.size': 12})
+
+# Set the default font family (e.g., to a common serif or sans-serif)
+# 'serif' often looks good in papers. Use 'sans-serif' for a cleaner look.
+plt.rcParams.update({'font.family': 'sans-serif'})
+
+# Settings for axes labels
+plt.rcParams.update({
+    'axes.labelsize': 12,      # Font size of the x and y labels
+    'axes.titlesize': 14,      # Font size of the plot title
+    'axes.linewidth': 0.8,     # Thickness of the plot borders
+    'axes.edgecolor': 'black'  # Color of the plot borders
+})
+
+# Settings for tick marks
+plt.rcParams.update({
+    'xtick.labelsize': 10,     # Font size of the x tick labels
+    'ytick.labelsize': 10,     # Font size of the y tick labels
+    'xtick.direction': 'in',   # Tick marks point inward
+    'ytick.direction': 'in',   # Tick marks point inward
+    'xtick.major.size': 4,     # Length of major x ticks
+    'ytick.major.size': 4,     # Length of major y ticks
+})
+
+# Settings for the legend
+plt.rcParams.update({
+    'legend.fontsize': 10,     # Font size of the legend
+    'legend.frameon': True,    # Draw a box around the legend
+    'legend.edgecolor': 'black',
+    'legend.fancybox': False   # Use a sharp-cornered box
+})
+class landscape:
+    def __init__(self, C=3, D=2, M=28, scale=1, CONSTRAIN_ROTATION=True, **dimensions):
+        self.C = C
+        self.D = D
+        self.M = M
+        self.scale=scale
+        self.CONSTRAIN_ROTATION = CONSTRAIN_ROTATION
+        for dimension, value in dimensions.items():
+            setattr(self, dimension, value)    
+
+    def simulate_dataset(self, key, noise=0):
+        key, key_z = random.split(key)
+        Z=random.normal(key_z, (self.C, self.D))
+        key, key_p = random.split(key)
+        P=random.normal(key_p, (self.M, self.D))
+        Noise_for_Z = noise*random.normal(key_z, Z.shape)
+        key, key_p = random.split(key)
+        Noise_for_P = noise*random.normal(key_p, P.shape)
+        if self.CONSTRAIN_ROTATION:
+            P = jnp.tril(P, -1)
+            P = P.at[jnp.triu_indices_from(P,-1)].set(jnp.abs(P[jnp.triu_indices_from(P,-1)]))
+
+        return key, Z + Noise_for_Z, P + Noise_for_P
+    
+    def calculate_fitness(self, Z, P, X):
+        tiledZ = jnp.tile(Z, (landscape_obj.M,1))
+        repedP = jnp.repeat(P,landscape_obj.C,axis=0)
+        repMutant = tiledZ+ repedP
+        Fitness = X*((jnp.exp( -jnp.einsum('cd,cd->c', repMutant, repMutant)/2)))
+        #(jnp.exp( -jnp.einsum('cmd,cmd->mc', Mutants_cdm, Mutants_cdm)/2)))
+        #assert (Fitness <=0).all().all()
+        return jnp.log(Fitness)
+
+class RegressionProblem:
+    def __init__(self, landscape_obj, observed_fitnesses,norm,C=3, D=2, M=28, CONSTRAIN_ROTATION=True,LOG_FITNESS=True):
+        self.landscape = landscape_obj
+        self.LOG_FITNESS=LOG_FITNESS
+        if self.LOG_FITNESS:
+            self.observed_fitnesses = observed_fitnesses
+        else:
+            self.observed_fitnesses = jnp.log(observed_fitnesses)
+        self.C = C
+        self.D = D
+        self.M = M
+        self.CONSTRAIN_ROTATION=CONSTRAIN_ROTATION
+    
+    def check_determined(self,Z,P):
+        # https://en.wikipedia.org/wiki/Underdetermined_system
+        observations=len(self.observed_fitnesses)
+        free_parameters=len(self.get_parameter_vector(Z,P))
+        print("Under-determined" if observations<free_parameters else "Over-Determined")
+    
+    def get_NA_location(self):
+        return jnp.argwhere(jnp.isnan(self.observed_fitnesses))
+    
+    def replace_NA(self):
+        observed_fitnesses_no_NA=self.observed_fitnesses.at[self.get_NA_location()].set(0)
+        return observed_fitnesses_no_NA
+    
+    def get_parameter_vector(self, Z, P, X):
+        P_flat=P[jnp.tril_indices_from(P,-1)]
+        Z_flat = jnp.ravel(Z)
+        X=jnp.ravel(X)
+        ZPflat=jnp.concatenate([Z_flat, P_flat]) 
+        return jnp.concatenate([X,ZPflat])     
+
+    def reconstruct_ZP(self, parameter_vector,D):
+       P=parameter_vector[-(self.M * self.D):].reshape((self.M, self.D))
+       Z = parameter_vector[1:self.C*self.D+1].reshape((self.C, self.D))
+       X = parameter_vector[0]
+       if self.CONSTRAIN_ROTATION:
+           P=jnp.zeros((self.M,self.D))
+           P=P.at[jnp.tril_indices_from(P,-1)].set(parameter_vector[self.C*self.D+1:])
+           P = jnp.tril(P, -1)
+           P = P.at[jnp.triu_indices_from(P,-1)].set(jnp.abs(P[jnp.triu_indices_from(P,-1)]))
+       return Z, P, X
+
+    def loss_function(self,parameter_vector,observed_fitness,norm,scalar_residual=True):
+        Z, P, X = self.reconstruct_ZP(parameter_vector,self.D)
+        predicted_fitness = self.landscape.calculate_fitness(Z, P, X)/(jnp.ravel(norm))
+        observed_fitness=observed_fitness/(jnp.ravel(norm))
+        #predicted_fitness = predicted_fitness.at[21].set(0)
+        loss=jaxopt.loss.huber_loss(observed_fitness, predicted_fitness)
+        #print(loss.shape)
+        #loss=loss.at[21].set(0)
+        #loss=loss.at[1].set(0)
+        return loss.sum() if scalar_residual else loss.ravel()
+   
+
+def regress_LBFGS(regression_obj, landscape_obj,simulated_fitness,norm,Z,P,X):
+    parameter_vector = regression_obj.get_parameter_vector(Z,P,X)
+    solver = jaxopt.LBFGS(fun=regression_obj.loss_function, maxiter=MAX_REGRESS_ITER)
+    res = solver.run(parameter_vector, observed_fitness=simulated_fitness,norm=norm)
+    return res.params
+
+landscape_obj=landscape()
+
+
+MiceG12C=pd.read_csv(r"Figure5A.csv")
+MiceG12D=pd.read_csv(r"Figure5B.csv")
+MiceEGFR=pd.read_csv(r"Figure5D.csv")
+
+
+mergeMiceG12=pd.merge(MiceG12C,MiceG12D,on='gene',how='inner')
+AllMice=pd.merge(mergeMiceG12,MiceEGFR,on="gene",how='inner')
+
+AllMiceVals=AllMice.loc[:, ['tumor_enrichment_x', 'tumor_enrichment_y','tumor_enrichment']]
+AllMiceCI=np.log(AllMice.loc[:,['CI_lower_x','CI_upper_x','CI_lower_y','CI_upper_y','CI_lower','CI_upper' ]])
+AllMiceCI['sumCI_x']=(AllMiceCI['CI_upper_x']-AllMiceCI['CI_lower_x'])
+AllMiceCI['sumCI_y']=(AllMiceCI['CI_upper_y']-AllMiceCI['CI_lower_y'])
+AllMiceCI['sumCI']=(AllMiceCI['CI_upper']-AllMiceCI['CI_lower'])
+ALLMiceNorm=AllMiceCI.loc[:,['sumCI_x','sumCI_y','sumCI']]
+ALLMiceNormNP=ALLMiceNorm.to_numpy()
+key, Z, P = landscape_obj.simulate_dataset(key)
+X=jnp.array(1)
+
+mice_fitness=jnp.transpose(AllMiceVals.to_numpy())
+mice_fitness=jnp.log(mice_fitness)
+regression_obj=RegressionProblem(landscape_obj, mice_fitness,ALLMiceNormNP)
+#regressedZP=regress_LBFGS(regression_obj, landscape_obj, jnp.ravel(mice_fitness),ALLMiceNormNP,Z,P,X)
+
+MicePredFitSeed10=pd.read_csv(r"Downloads\BlairMouse10Results.csv",index_col=0).to_numpy()
+MicePredFitSeed111=pd.read_csv(r"Downloads\BlairMouse111Results.csv",index_col=0).to_numpy()
+MicePredFitSeed15=pd.read_csv(r"BlairMouse15Results.csv",index_col=0).to_numpy()
+MicePredFitSeed1500=pd.read_csv(r"Downloads\BlairMouse1500Results.csv",index_col=0).to_numpy()
+MicePredFitSeed2=pd.read_csv(r"Downloads\BlairMouse2Results.csv",index_col=0).to_numpy()
+MicePredFitSeed302=pd.read_csv(r"Downloads\BlairMouse302Results.csv",index_col=0).to_numpy()
+MicePredFitSeed80=pd.read_csv(r"Downloads\BlairMouse80Results.csv",index_col=0).to_numpy()
+MicePredFitSeed280=pd.read_csv(r"Downloads\BlairMouse280Results.csv",index_col=0).to_numpy()
+MicePredFitSeed980=pd.read_csv(r"Downloads\BlairMouse980Results.csv",index_col=0).to_numpy()
+MicePredFitSeed530=pd.read_csv(r"Downloads\BlairMouse530Results.csv",index_col=0).to_numpy()
+
+
+
+loss10=(sum(jaxopt.loss.huber_loss(jnp.ravel(mice_fitness)/(jnp.ravel(ALLMiceNormNP)), MicePredFitSeed10.flatten()/(jnp.ravel(ALLMiceNormNP)))))
+loss111=(sum(jaxopt.loss.huber_loss(jnp.ravel(mice_fitness)/(jnp.ravel(ALLMiceNormNP)), MicePredFitSeed111.flatten()/(jnp.ravel(ALLMiceNormNP)))))
+loss15=(sum(jaxopt.loss.huber_loss(jnp.ravel(mice_fitness)/(jnp.ravel(ALLMiceNormNP)), MicePredFitSeed15.flatten()/(jnp.ravel(ALLMiceNormNP)))))
+loss1500=(sum(jaxopt.loss.huber_loss(jnp.ravel(mice_fitness)/(jnp.ravel(ALLMiceNormNP)), MicePredFitSeed1500.flatten()/(jnp.ravel(ALLMiceNormNP)))))
+loss2=(sum(jaxopt.loss.huber_loss(jnp.ravel(mice_fitness)/(jnp.ravel(ALLMiceNormNP)), MicePredFitSeed2.flatten()/(jnp.ravel(ALLMiceNormNP)))))
+loss302=(sum(jaxopt.loss.huber_loss(jnp.ravel(mice_fitness)/(jnp.ravel(ALLMiceNormNP)), MicePredFitSeed302.flatten()/(jnp.ravel(ALLMiceNormNP)))))
+loss80=(sum(jaxopt.loss.huber_loss(jnp.ravel(mice_fitness)/(jnp.ravel(ALLMiceNormNP)), MicePredFitSeed80.flatten()/(jnp.ravel(ALLMiceNormNP)))))
+loss280=(sum(jaxopt.loss.huber_loss(jnp.ravel(mice_fitness)/(jnp.ravel(ALLMiceNormNP)), MicePredFitSeed280.flatten()/(jnp.ravel(ALLMiceNormNP)))))
+loss980=(sum(jaxopt.loss.huber_loss(jnp.ravel(mice_fitness)/(jnp.ravel(ALLMiceNormNP)), MicePredFitSeed980.flatten()/(jnp.ravel(ALLMiceNormNP)))))
+loss530=(sum(jaxopt.loss.huber_loss(jnp.ravel(mice_fitness)/(jnp.ravel(ALLMiceNormNP)), MicePredFitSeed530.flatten()/(jnp.ravel(ALLMiceNormNP)))))
+
+#SE530=(((mice_fitness.flatten())-MicePredFitSeed530.flatten())**2)/((ALLMiceNormNP.flatten()))
+
+
+UpperErr=AllMiceCI.loc[:,['CI_upper_x','CI_upper_y','CI_upper' ]]
+LowerErr=AllMiceCI.loc[:,['CI_lower_x','CI_lower_y','CI_lower']]
+
+UpperErrNP=UpperErr.to_numpy()
+LowerErrNP=LowerErr.to_numpy()
+
+
+from sklearn.metrics import r2_score
+
+r2 = r2_score(jnp.ravel(mice_fitness), MicePredFitSeed15)
+plt.rcParams.update({'font.size': 12})
+
+plt.scatter(jnp.ravel(mice_fitness),MicePredFitSeed15,c=ALLMiceNormNP.flatten(),cmap="summer",marker="o",alpha=.5)
+plt.title("Regressed VS Measured Fitness",fontsize=16)
+plt.ylabel("Log Regressed Fitness",fontsize=14)
+plt.xlabel("Log Observed Fitness",fontsize=14)
+plt.colorbar(label='Error Values')
+plt.plot((-2,2),(-2,2),color="black")
+plt.savefig("MtoMPlots\Reg_vs_Real_Mouse.pdf", dpi=300)
+
+plt.show()
+
+
+#sum of error divided by number of values!!
+
+import seaborn as sns
+
+s=sns.heatmap(MicePredFitSeed15.reshape((3,28)),vmin=-1.6, vmax=1.6)
+#s=sns.heatmap(MicePredFitSeed280.reshape((3,28)),vmin=-1.6, vmax=1.6)
+s=sns.heatmap(mice_fitness)
+
+MutationLables=MiceG12C.loc[:,"gene"]
+
+s=sns.heatmap(MicePredFitSeed15.reshape((3,28)),xticklabels=MutationLables,yticklabels=["G12C","G12D","EGFR;p53"],cmap="coolwarm",annot=False,cbar_kws={'ticks': [-1.5, -1, -0.5, 0, 0.5, 1.0, 1.5]}, vmin=-1.6, vmax=1.6)
+plt.title("Log Regressed Fitness")
+s.set_ylabel("Mouse Model")
+s.set_xlabel("Mutation")
+
+s=sns.heatmap(mice_fitness,xticklabels=MutationLables,yticklabels=["G12C","G12D","EGFR;p53"],cmap="coolwarm",annot=False,cbar_kws={'ticks': [-1.5, -1, -0.5, 0, 0.5, 1.0, 1.5]}, vmin=-1.6, vmax=1.6)
+plt.title("Log Measured Fitness")
+s.set_ylabel("Mouse Model")
+s.set_xlabel("Mutation")
+
+
+
+plt.figure(figsize=(8, 6))
+plt.scatter(jnp.ravel(mice_fitness),MicePredFitSeed15,c=ALLMiceNormNP.flatten(),cmap="summer",marker="o")
+
+# 3. Add density isoclines using seaborn.kdeplot
+# The 'levels' argument controls the number of isoclines
+# The 'color' argument sets the line color
+# The 'linestyles' argument sets the line style (e.g., 'dashed')
+sns.kdeplot(
+    x=jnp.ravel(mice_fitness),
+    y=MicePredFitSeed15.flatten(),
+    levels=10, # Number of contour lines
+    color="slategrey",
+    linestyles='dashed',
+    ax=plt.gca() # Use the current matplotlib axes
+)
+
+plt.title('Regressed VS Measured Fitness')
+plt.xlabel('Log Regressed Fitness')
+plt.ylabel('Log Observed Fitness')
+plt.plot((-2,2),(-2,2),color="black")
+plt.colorbar(label='Error Values')
+#plt.legend()
+plt.grid(False)
+plt.show()
