@@ -1,124 +1,139 @@
+
 # -*- coding: utf-8 -*-
 """
-Created on Mon Dec 22 12:33:34 2025
+Created on Wed Apr  8 13:30:04 2026
 
 @author: Meaghan Parks
 """
-
-import jax.numpy as jnp
-import matplotlib.pyplot as plt
 import jax
-import numpy as np
-from jax import random
-from jax.scipy.optimize import minimize
-import math
 import jax.numpy as jnp
-import jaxopt 
+from jax import random
+import jaxopt
 import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
-MAX_REGRESS_ITER = 1E9
-#CONSTRAIN_ROTATION=True
-#D=2
-#C=13
-#M=18
-seed = 980
+from scipy.linalg import orthogonal_procrustes
+from sklearn.metrics import mean_absolute_error, r2_score
+import scipy.stats as stats
+# --- Configuration ---
+MAX_REGRESS_ITER = 50000 
+NUM_SEEDS = 500
+BASE_SEED = 980
+TARGET_D = 2  
+L2_LAMBDA = 1e-4 
 
-key = random.PRNGKey(seed)
+# --- Helper Functions ---
 
-class landscape:
-    def __init__(self, C=3, D=2, M=28, scale=1, CONSTRAIN_ROTATION=True, **dimensions):
+def gauge_fix_posthoc(Z, P, anchor_idx, second_anchor_idx=None):
+    # 1. Translation: Center the mutants (P) at the origin
+    P_mean = np.mean(P, axis=0)
+    P_centered = P - P_mean
+    Z_shifted = Z + P_mean  # Z must shift inversely to maintain fitness values
+
+    # 2. Rotation: Align Anchor Mutant to the +X axis
+    anchor = P_centered[anchor_idx]
+    angle = np.arctan2(anchor[1], anchor[0])
+    
+    # Standard 2D Rotation Matrix
+    cos_a, sin_a = np.cos(-angle), np.sin(-angle)
+    R = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
+
+    P_fixed = P_centered @ R
+    Z_fixed = Z_shifted @ R
+
+    # 3. Reflection: Ensure Y-axis orientation is consistent
+    if second_anchor_idx is None:
+        # Default to the point with the largest Y-magnitude if not specified
+        second_anchor_idx = np.argmax(np.abs(P_fixed[:, 1]))
+    
+    if P_fixed[second_anchor_idx, 1] < 0:
+        P_fixed[:, 1] = -P_fixed[:, 1]
+        Z_fixed[:, 1] = -Z_fixed[:, 1]
+
+    return Z_fixed, P_fixed
+def calculate_intermutant_distances(P):
+    """Returns an (M, M) matrix of pairwise Euclidean distances."""
+    diff = P[:, np.newaxis, :] - P[np.newaxis, :, :]
+    return np.sqrt(np.sum(diff**2, axis=2))
+# --- Classes ---
+
+class Landscape:
+    def __init__(self, C=3, D=2, M=28, CONSTRAIN_ROTATION=True):
         self.C = C
         self.D = D
         self.M = M
-        self.scale=scale
         self.CONSTRAIN_ROTATION = CONSTRAIN_ROTATION
-        for dimension, value in dimensions.items():
-            setattr(self, dimension, value)    
 
-    def simulate_dataset(self, key, noise=0):
-        key, key_z = random.split(key)
-        Z=random.normal(key_z, (self.C, self.D))
-        key, key_p = random.split(key)
-        P=random.normal(key_p, (self.M, self.D))
-        Noise_for_Z = noise*random.normal(key_z, Z.shape)
-        key, key_p = random.split(key)
-        Noise_for_P = noise*random.normal(key_p, P.shape)
-        if self.CONSTRAIN_ROTATION:
-            P = jnp.tril(P, -1)
-            P = P.at[jnp.triu_indices_from(P,-1)].set(jnp.abs(P[jnp.triu_indices_from(P,-1)]))
+    def generate_initial_guess(self, key):
+        key, kZ, kP, kX = random.split(key, 4)
+        Z = random.normal(kZ, (self.C, self.D))
+        P = random.normal(kP, (self.M, self.D))
+        X = 1.0  
+        return key, Z, P, X
 
-        return key, Z + Noise_for_Z, P + Noise_for_P
-    
     def calculate_fitness(self, Z, P, X):
-        tiledZ = jnp.tile(Z, (landscape_obj.M,1))
-        repedP = jnp.repeat(P,landscape_obj.C,axis=0)
-        repMutant = tiledZ+ repedP
-        Fitness = X*((jnp.exp( -jnp.einsum('cd,cd->c', repMutant, repMutant)/2)))
-        #(jnp.exp( -jnp.einsum('cmd,cmd->mc', Mutants_cdm, Mutants_cdm)/2)))
-        #assert (Fitness <=0).all().all()
-        return jnp.log(Fitness)
+        combined_phenotype = Z[:, jnp.newaxis, :] + P[jnp.newaxis, :, :]
+        dist_sq = jnp.sum(jnp.square(combined_phenotype), axis=2)
+        return jnp.log(jnp.abs(X)) - (dist_sq / 2.0)
 
 class RegressionProblem:
-    def __init__(self, landscape_obj, observed_fitnesses,norm,C=3, D=2, M=28, CONSTRAIN_ROTATION=True,LOG_FITNESS=True):
+    def __init__(self, landscape_obj, observed_fitnesses, norm):
         self.landscape = landscape_obj
-        self.LOG_FITNESS=LOG_FITNESS
-        if self.LOG_FITNESS:
-            self.observed_fitnesses = observed_fitnesses
-        else:
-            self.observed_fitnesses = jnp.log(observed_fitnesses)
-        self.C = C
-        self.D = D
-        self.M = M
-        self.CONSTRAIN_ROTATION=CONSTRAIN_ROTATION
-    
-    def check_determined(self,Z,P):
-        # https://en.wikipedia.org/wiki/Underdetermined_system
-        observations=len(self.observed_fitnesses)
-        free_parameters=len(self.get_parameter_vector(Z,P))
-        print("Under-determined" if observations<free_parameters else "Over-Determined")
-    
-    def get_NA_location(self):
-        return jnp.argwhere(jnp.isnan(self.observed_fitnesses))
-    
-    def replace_NA(self):
-        observed_fitnesses_no_NA=self.observed_fitnesses.at[self.get_NA_location()].set(0)
-        return observed_fitnesses_no_NA
-    
+        self.observed_fitnesses = observed_fitnesses
+        self.norm = norm
+        self.C = landscape_obj.C
+        self.D = landscape_obj.D
+        self.M = landscape_obj.M
+        self.CONSTRAIN_ROTATION = landscape_obj.CONSTRAIN_ROTATION
+
     def get_parameter_vector(self, Z, P, X):
-        P_flat=P[jnp.tril_indices_from(P,-1)]
         Z_flat = jnp.ravel(Z)
-        X=jnp.ravel(X)
-        ZPflat=jnp.concatenate([Z_flat, P_flat]) 
-        return jnp.concatenate([X,ZPflat])     
+        X_val = jnp.array([X])
+        if self.CONSTRAIN_ROTATION:
+            indices = jnp.tril_indices(self.M, k=0, m=self.D)
+            P_flat = P[indices]
+        else:
+            P_flat = jnp.ravel(P)
+        return jnp.concatenate([X_val, Z_flat, P_flat])
 
-    def reconstruct_ZP(self, parameter_vector,D):
-       P=parameter_vector[-(self.M * self.D):].reshape((self.M, self.D))
-       Z = parameter_vector[1:self.C*self.D+1].reshape((self.C, self.D))
-       X = parameter_vector[0]
-       if self.CONSTRAIN_ROTATION:
-           P=jnp.zeros((self.M,self.D))
-           P=P.at[jnp.tril_indices_from(P,-1)].set(parameter_vector[self.C*self.D+1:])
-           P = jnp.tril(P, -1)
-           P = P.at[jnp.triu_indices_from(P,-1)].set(jnp.abs(P[jnp.triu_indices_from(P,-1)]))
-       return Z, P, X
+    def reconstruct_ZP(self, parameter_vector):
+        X = parameter_vector[0]
+        Z = parameter_vector[1 : self.C * self.D + 1].reshape((self.C, self.D))
+        remaining = parameter_vector[self.C * self.D + 1:]
+        
+        P = jnp.zeros((self.M, self.D))
+        if self.CONSTRAIN_ROTATION:
+            indices = jnp.tril_indices(self.M, k=0, m=self.D)
+            P = P.at[indices].set(remaining)
+        else:
+            P = remaining.reshape((self.M, self.D))
+        return Z, P, X
 
-    def loss_function(self,parameter_vector,observed_fitness,norm,scalar_residual=True):
-        Z, P, X = self.reconstruct_ZP(parameter_vector,self.D)
-        predicted_fitness = self.landscape.calculate_fitness(Z, P, X)/(jnp.ravel(norm))
-        observed_fitness=observed_fitness/(jnp.ravel(norm))
-        #predicted_fitness = predicted_fitness.at[21].set(0)
-        loss=jaxopt.loss.huber_loss(observed_fitness, predicted_fitness)
-        #print(loss.shape)
-        #loss=loss.at[21].set(0)
-        #loss=loss.at[1].set(0)
-        return loss.sum() if scalar_residual else loss.ravel()
-   
+    def loss_function(self, parameter_vector, observed_fitness, norm, l2_lambda):
+        Z, P, X = self.reconstruct_ZP(parameter_vector)
+        predicted_fitness = self.landscape.calculate_fitness(Z, P, X)
+        weighted_residuals = (observed_fitness - predicted_fitness) / norm
+        data_loss = jnp.mean(jnp.square(weighted_residuals))
+        reg_loss = l2_lambda * (jnp.sum(jnp.square(Z)) + jnp.sum(jnp.square(P)))
+        return data_loss + reg_loss
 
-def regress_LBFGS(regression_obj, landscape_obj,simulated_fitness,norm,Z,P,X):
-    parameter_vector = regression_obj.get_parameter_vector(Z,P,X)
-    solver = jaxopt.LBFGS(fun=regression_obj.loss_function, maxiter=MAX_REGRESS_ITER)
-    res = solver.run(parameter_vector, observed_fitness=simulated_fitness,norm=norm)
-    return res.params
-
-landscape_obj=landscape()
-
+def align_all(ps_runs, zs_runs, max_iter=10):
+    mean_P = np.mean(ps_runs, axis=0)
+    for _ in range(max_iter):
+        aligned_ps, aligned_zs = [], []
+        for i in range(len(ps_runs)):
+            P, Z = ps_runs[i], zs_runs[i]
+            P_mean = np.mean(P, axis=0)
+            P_centered = P - P_mean
+            scale = np.linalg.norm(P_centered)
+            P_scaled = P_centered / scale
+            mean_centered = mean_P - np.mean(mean_P, axis=0)
+            mean_scaled = mean_centered / np.linalg.norm(mean_centered)
+            R, _ = orthogonal_procrustes(P_scaled, mean_scaled)
+            aligned_ps.append(P_scaled @ R)
+            aligned_zs.append(((Z + P_mean) / scale) @ R)
+        aligned_ps, aligned_zs = np.array(aligned_ps), np.array(aligned_zs)
+        new_mean = np.mean(aligned_ps, axis=0)
+        if np.linalg.norm(new_mean - mean_P) < 1e-6: break
+        mean_P = new_mean
+    return aligned_ps, aligned_zs
