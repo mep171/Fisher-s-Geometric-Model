@@ -15,7 +15,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 
-# --- Configuration & Constants ---
+
 MAX_REGRESS_ITER = 10000
 L2_LAMBDA = 1e-5
 C_VAL = 20
@@ -28,23 +28,15 @@ D_GUESS_VALUES = [1, 2, 3, 4, 5]
 SEED_SIM = 90
 SEED_GUESS_LIST = [980]
 
-# --- Helper Functions ---
 
 def gauge_fix_posthoc(Z_pred, P_pred, Z_ref, P_ref):
-    """
-    Generalized Procrustes Alignment for any dimension D.
-    Aligns the 'Guess' coordinates to the 'True' coordinates[cite: 9, 11, 12].
-    """
-    # 1. Fix Translation: Center the data based on P
     P_mean = np.mean(P_pred, axis=0)
     P_centered = P_pred - P_mean
     Z_shifted = Z_pred + P_mean
 
-    # 2. Fix Rotation/Reflection: Singular Value Decomposition (SVD)
     A = np.vstack([Z_shifted, P_centered])
     B = np.vstack([Z_ref, P_ref])
     
-    # Calculate optimal rotation matrix R
     M = A.T @ B
     U, S, Vt = np.linalg.svd(M)
     R = U @ Vt
@@ -52,10 +44,6 @@ def gauge_fix_posthoc(Z_pred, P_pred, Z_ref, P_ref):
     return Z_shifted @ R, P_centered @ R
 
 def calculate_stable_bic(mse, n_samples, k_eff):
-    """
-    Calculates BIC using the MSE-based log-likelihood to prevent 
-    penalty term dominance[cite: 31, 33, 34].
-    """
     return n_samples * np.log(mse + 1e-10) + k_eff * np.log(n_samples)
 
 # --- Classes ---
@@ -117,7 +105,6 @@ def save_individual_plots(results_list):
     D_true_vals = sorted(df['True_Dimension'].unique())
     colors = plt.cm.plasma(np.linspace(0, 0.9, len(D_true_vals)))
 
-    # FIGURE 1: R2 Score [cite: 1, 3]
     plt.figure(figsize=(9, 7))
     for i, dt in enumerate(D_true_vals):
         sub = df[df['True_Dimension'] == dt]
@@ -132,7 +119,6 @@ def save_individual_plots(results_list):
     plt.savefig("R2_Score_Analysis.pdf", dpi=300)
     plt.show()
 
-    # FIGURE 2: BIC Score [cite: 5, 31]
     plt.figure(figsize=(9, 7))
     for i, dt in enumerate(D_true_vals):
         sub = df[df['True_Dimension'] == dt]
@@ -147,7 +133,6 @@ def save_individual_plots(results_list):
     plt.savefig("BIC_Score_Analysis.pdf", dpi=300)
     plt.show()
 
-# --- Main Execution ---
 
 def main():
     key_sim = random.PRNGKey(SEED_SIM)
@@ -172,7 +157,7 @@ def main():
                 params, _ = regress_LBFGS(prob, gZ, gP, GUESS_X)
                 rZ, rP, rX = prob.reconstruct_ZP(params)
                 
-                # Metrics
+                
                 pred_fit = ls_guess.calculate_fitness(rZ, rP, rX)
                 mse = float(jnp.mean((sim_fit - pred_fit) ** 2))
                 
@@ -180,7 +165,6 @@ def main():
                 ss_tot = jnp.sum((sim_fit - jnp.mean(sim_fit)) ** 2)
                 r2 = float(1 - (ss_res / ss_tot))
 
-                # Effective parameters minus gauge constraints [cite: 35, 41, 42]
                 n_params = len(params)
                 constraints = (D_guess * (D_guess + 1)) // 2
                 eff_p = n_params - constraints
