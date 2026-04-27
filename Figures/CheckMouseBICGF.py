@@ -16,11 +16,11 @@ from scipy.linalg import orthogonal_procrustes
 
 # --- Configuration ---
 MAX_REGRESS_ITER = 50000 
-NUM_SEEDS = 200 # Reduced for faster comparison; increase for production
+NUM_SEEDS = 200 
 BASE_SEED = 980
 L2_LAMBDA = 1e-4 
 
-# --- Helper Functions ---
+
 
 def calculate_r_squared(observed, predicted, weights=None):
     obs_flat = jnp.ravel(observed)
@@ -39,14 +39,12 @@ def calculate_r_squared(observed, predicted, weights=None):
     return 1.0 - (ss_res / ss_tot)
 
 def gauge_fix_posthoc(Z, P, anchor_idx, second_anchor_idx=None):
-    # Center mutants
     P_mean = np.mean(P, axis=0)
     P_centered = P - P_mean
     Z_shifted = Z + P_mean 
 
-    # Handle rotation/alignment based on dimensionality
+    
     if P.shape[1] == 1:
-        # 1D: Simple sign flip to align anchor to positive
         if P_centered[anchor_idx] < 0:
             P_fixed = -P_centered
             Z_fixed = -Z_shifted
@@ -54,7 +52,7 @@ def gauge_fix_posthoc(Z, P, anchor_idx, second_anchor_idx=None):
             P_fixed = P_centered
             Z_fixed = Z_shifted
     else:
-        # 2D: Rotation alignment
+
         anchor = P_centered[anchor_idx]
         angle = np.arctan2(anchor[1], anchor[0])
         cos_a, sin_a = np.cos(-angle), np.sin(-angle)
@@ -168,9 +166,9 @@ def run_inference_for_d(d_val, observed, norm, num_seeds, base_key):
 def main():
     # --- Data Loading ---
     try:
-        MiceG12C = pd.read_csv(r"C:\Users\Meaghan Parks\Documents\McFarlandLabProjects\Figure5A.csv")
-        MiceG12D = pd.read_csv(r"C:\Users\Meaghan Parks\Documents\McFarlandLabProjects\Figure5B.csv")
-        MiceEGFR = pd.read_csv(r"C:\Users\Meaghan Parks\Documents\McFarlandLabProjects\Figure5D.csv")
+        MiceG12C = pd.read_csv(r"Figure5A.csv")
+        MiceG12D = pd.read_csv(r"Figure5B.csv")
+        MiceEGFR = pd.read_csv(r"Figure5D.csv")
 
     except FileNotFoundError:
         print("Error: CSV files not found.")
