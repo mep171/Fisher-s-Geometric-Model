@@ -44,25 +44,22 @@ def calculate_r_squared(observed, predicted, weights=None):
     return 1.0 - (ss_res / ss_tot)
 
 def gauge_fix_posthoc(Z, P, anchor_idx, second_anchor_idx=None):
-    # 1. Translation: Center the mutants (P) at the origin
+
     P_mean = np.mean(P, axis=0)
     P_centered = P - P_mean
-    Z_shifted = Z + P_mean  # Z must shift inversely to maintain fitness values
-
-    # 2. Rotation: Align Anchor Mutant to the +X axis
+    Z_shifted = Z + P_mean  
     anchor = P_centered[anchor_idx]
     angle = np.arctan2(anchor[1], anchor[0])
     
-    # Standard 2D Rotation Matrix
+
     cos_a, sin_a = np.cos(-angle), np.sin(-angle)
     R = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
 
     P_fixed = P_centered @ R
     Z_fixed = Z_shifted @ R
 
-    # 3. Reflection: Ensure Y-axis orientation is consistent
+
     if second_anchor_idx is None:
-        # Default to the point with the largest Y-magnitude if not specified
         second_anchor_idx = np.argmax(np.abs(P_fixed[:, 1]))
     
     if P_fixed[second_anchor_idx, 1] < 0:
@@ -158,14 +155,13 @@ def align_all(ps_runs, zs_runs, max_iter=10):
     return aligned_ps, aligned_zs
 
 def main():
-    # --- Setup & Data Loading ---
     ls_obj = Landscape(C=3, D=TARGET_D, M=28, CONSTRAIN_ROTATION=False)
     key = random.PRNGKey(BASE_SEED)
 
     try:
-        MiceG12C = pd.read_csv(r"C:\Users\Meaghan Parks\Documents\McFarlandLabProjects\Figure5A.csv")
-        MiceG12D = pd.read_csv(r"C:\Users\Meaghan Parks\Documents\McFarlandLabProjects\Figure5B.csv")
-        MiceEGFR = pd.read_csv(r"C:\Users\Meaghan Parks\Documents\McFarlandLabProjects\Figure5D.csv")
+        MiceG12C = pd.read_csv(r"Figure5A.csv")
+        MiceG12D = pd.read_csv(r"Figure5B.csv")
+        MiceEGFR = pd.read_csv(r"Figure5D.csv")
     except FileNotFoundError:
         print("Error: CSV files not found.")
         return
