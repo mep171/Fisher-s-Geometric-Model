@@ -12,14 +12,13 @@ from scipy.optimize import minimize
 from scipy.stats import pearsonr
 from sklearn.metrics import mean_absolute_error, r2_score
 
-# --- Configuration (Matching your workflow) ---
+
 MAX_REGRESS_ITER = 1000
-NUM_SEEDS = 25           # Multi-seed approach to ensure global minimum
+NUM_SEEDS = 25           #
 L2_LAMBDA = 1e-4 
 TARGET_D = 2 
-C_COUNT, M_COUNT = 5, 20 # Synthetic dimensions
+C_COUNT, M_COUNT = 5, 20 
 
-# --- Updated Classes ---
 
 class Landscape:
     def __init__(self, C, D, M):
@@ -55,29 +54,27 @@ class RegressionProblem:
         reg_loss = L2_LAMBDA * (np.sum(Z**2) + np.sum(P**2))
         return data_loss + reg_loss
 
-# --- 1. Generate Synthetic Data ---
+
 np.random.seed(980)
 ls_obj = Landscape(C_COUNT, TARGET_D, M_COUNT)
 
-# Ground Truth
+
 Z_true = np.random.normal(size=(C_COUNT, TARGET_D))
 P_true = np.random.normal(size=(M_COUNT, TARGET_D))
 X_true = 25.0
 fit_true = ls_obj.calculate_fitness(Z_true, P_true, X_true)
 
-# Simulated Uncertainty and Noisy Observations
+
 Norm = np.abs(np.random.normal(loc=0.2, scale=0.1, size=fit_true.shape))
 noise = np.random.normal(scale=Norm)
 Simulated_fitness = fit_true + noise
 
-# --- 2. Multi-Seed Optimization ---
 prob = RegressionProblem(ls_obj, Simulated_fitness, Norm)
 best_loss = np.inf
 best_preds = None
 
 print(f"Optimizing across {NUM_SEEDS} seeds...")
 for i in range(NUM_SEEDS):
-    # Random guess for each seed
     init_params = prob.pack(np.random.normal(size=(C_COUNT, TARGET_D)), 
                             np.random.normal(size=(M_COUNT, TARGET_D)), 1.0)
     
@@ -88,7 +85,7 @@ for i in range(NUM_SEEDS):
         Z_final, P_final, X_final = prob.unpack(res.x)
         best_preds = ls_obj.calculate_fitness(Z_final, P_final, X_final)
 
-# --- 3. Plotting and Metrics ---
+
 obs_flat = Simulated_fitness.flatten()
 pred_flat = best_preds.flatten()
 
