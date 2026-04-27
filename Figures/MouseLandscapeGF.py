@@ -14,6 +14,7 @@ import matplotlib.pyplot as plt
 from scipy.linalg import orthogonal_procrustes
 from sklearn.metrics import mean_absolute_error, r2_score
 import scipy.stats as stats
+import matplotlib.colors as mcolors
 # --- Configuration ---
 MAX_REGRESS_ITER = 50000 
 NUM_SEEDS = 500
@@ -21,7 +22,6 @@ BASE_SEED = 980
 TARGET_D = 2  
 L2_LAMBDA = 1e-4 
 
-# --- Helper Functions ---
 
 def calculate_r_squared(observed, predicted, weights=None):
     """
@@ -44,25 +44,22 @@ def calculate_r_squared(observed, predicted, weights=None):
     return 1.0 - (ss_res / ss_tot)
 
 def gauge_fix_posthoc(Z, P, anchor_idx, second_anchor_idx=None):
-    # 1. Translation: Center the mutants (P) at the origin
     P_mean = np.mean(P, axis=0)
     P_centered = P - P_mean
-    Z_shifted = Z + P_mean  # Z must shift inversely to maintain fitness values
-
-    # 2. Rotation: Align Anchor Mutant to the +X axis
+    Z_shifted = Z + P_mean  
     anchor = P_centered[anchor_idx]
     angle = np.arctan2(anchor[1], anchor[0])
     
-    # Standard 2D Rotation Matrix
+   
     cos_a, sin_a = np.cos(-angle), np.sin(-angle)
     R = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
 
     P_fixed = P_centered @ R
     Z_fixed = Z_shifted @ R
 
-    # 3. Reflection: Ensure Y-axis orientation is consistent
+   
     if second_anchor_idx is None:
-        # Default to the point with the largest Y-magnitude if not specified
+        
         second_anchor_idx = np.argmax(np.abs(P_fixed[:, 1]))
     
     if P_fixed[second_anchor_idx, 1] < 0:
@@ -136,36 +133,15 @@ class RegressionProblem:
         reg_loss = l2_lambda * (jnp.sum(jnp.square(Z)) + jnp.sum(jnp.square(P)))
         return data_loss + reg_loss
 
-def align_all(ps_runs, zs_runs, max_iter=10):
-    mean_P = np.mean(ps_runs, axis=0)
-    for _ in range(max_iter):
-        aligned_ps, aligned_zs = [], []
-        for i in range(len(ps_runs)):
-            P, Z = ps_runs[i], zs_runs[i]
-            P_mean = np.mean(P, axis=0)
-            P_centered = P - P_mean
-            scale = np.linalg.norm(P_centered)
-            P_scaled = P_centered / scale
-            mean_centered = mean_P - np.mean(mean_P, axis=0)
-            mean_scaled = mean_centered / np.linalg.norm(mean_centered)
-            R, _ = orthogonal_procrustes(P_scaled, mean_scaled)
-            aligned_ps.append(P_scaled @ R)
-            aligned_zs.append(((Z + P_mean) / scale) @ R)
-        aligned_ps, aligned_zs = np.array(aligned_ps), np.array(aligned_zs)
-        new_mean = np.mean(aligned_ps, axis=0)
-        if np.linalg.norm(new_mean - mean_P) < 1e-6: break
-        mean_P = new_mean
-    return aligned_ps, aligned_zs
-
 def main():
     # --- Setup & Data Loading ---
     ls_obj = Landscape(C=3, D=TARGET_D, M=28, CONSTRAIN_ROTATION=False)
     key = random.PRNGKey(BASE_SEED)
 
     try:
-        MiceG12C = pd.read_csv(r"C:\Users\Meaghan Parks\Documents\McFarlandLabProjects\Figure5A.csv")
-        MiceG12D = pd.read_csv(r"C:\Users\Meaghan Parks\Documents\McFarlandLabProjects\Figure5B.csv")
-        MiceEGFR = pd.read_csv(r"C:\Users\Meaghan Parks\Documents\McFarlandLabProjects\Figure5D.csv")
+        MiceG12C = pd.read_csv(r"Figure5A.csv")
+        MiceG12D = pd.read_csv(r"Figure5B.csv")
+        MiceEGFR = pd.read_csv(r"Figure5D.csv")
     except FileNotFoundError:
         print("Error: CSV files not found.")
         return
@@ -188,7 +164,6 @@ def main():
 
     results_list, Z_runs, P_runs, Pred_fits = [], [], [], []
     
-    # --- Optimization Loop ---
     for i in range(NUM_SEEDS):
         key, Z_init, P_init, X_init = ls_obj.generate_initial_guess(key)
         init_pv = prob_obj.get_parameter_vector(Z_init, P_init, X_init)
@@ -204,24 +179,23 @@ def main():
         except Exception as e:
             continue
 
-    # --- Identify Best Seed for Plotting ---
     losses = np.array([r['loss'] for r in results_list])
     best_idx = np.argmin(losses)
     best_seed = results_list[best_idx]['seed']
     print(f"Best Seed found: {best_seed}")
-    # Map your requested variables to the best result
+
     mice_fitness = jnp.ravel(observed)
     MicePredFitBest = jnp.ravel(Pred_fits[best_idx])
     uncertainty = norm.flatten()
 
-    # --- Calculations ---
+    
     r2 = r2_score(mice_fitness, MicePredFitBest)
     mae = mean_absolute_error(mice_fitness, MicePredFitBest)
     pcc, p_val = stats.pearsonr(mice_fitness, MicePredFitBest)
 
     print(f"Best Seed Stats: R2={r2:.4f}, MAE={mae:.4f}, PCC={pcc:.4f}")
 
-    # --- Plotting: Regressed vs Measured ---
+    
     plt.figure(figsize=(8, 6))
     plt.rcParams.update({'font.size': 12})
     
@@ -231,24 +205,20 @@ def main():
     plt.ylabel("Log Regressed Fitness", fontsize=14)
     plt.xlabel("Log Observed Fitness", fontsize=14)
     
-    # Dynamic text placement based on metrics
     plt.text(np.min(mice_fitness), np.max(MicePredFitBest)-0.3, f"MAE= {mae:.4f}", fontsize=12)
     plt.text(np.min(mice_fitness), np.max(MicePredFitBest)-0.6, f"PCC = {pcc:.4f}, p < .00001", fontsize=12)
     
     plt.colorbar(label='Experimental Uncertainty')
     
-    # Identity Line
     lims = [np.min([mice_fitness, MicePredFitBest]), np.max([mice_fitness, MicePredFitBest])]
     plt.plot(lims, lims, color="black", linestyle="--")
     
     plt.tight_layout()
     plt.savefig("Reg_vs_Real_Mouse.pdf", dpi=300)
     plt.show()
-# --- Add this after the optimization loop in main() ---
     
-    import matplotlib.colors as mcolors
 
-    # 1. Extract Best Parameters
+    
     best_params = results_list[best_idx]
     fZ_best, fP_best, fX_best = prob_obj.reconstruct_ZP(solver.run(init_pv, observed, norm, L2_LAMBDA).params)
     
@@ -256,19 +226,17 @@ def main():
     P_np = np.array(fP_best)
     reX = float(fX_best)
 
-    # 2. Compute Mutant Positions (Z_i + P_j)
-    # This creates a (C*M, D) array: 0-27 (G12C), 28-55 (G12D), 56-83 (EGFR)
     mutants = (Z_np[:, np.newaxis, :] + P_np[np.newaxis, :, :]).reshape(-1, TARGET_D)
 
     def get_log_fitness(coords, X_scale):
         dot_product = np.sum(coords**2, axis=-1)
         return np.log(X_scale) - (dot_product / 2.0)
 
-    # Common Plotting Settings
+    
     vmin, vmax, vcenter = -8, 5.5, 0
     div_norm = mcolors.TwoSlopeNorm(vmin=vmin, vcenter=vcenter, vmax=vmax)
     
-    # --- Plot 1: Combined Landscape ---
+    # Combined
     plt.figure(figsize=(12, 8))
     x_grid = np.linspace(-3, 3, 100)
     y_grid = np.linspace(-3, 3, 100)
@@ -287,9 +255,8 @@ def main():
     plt.savefig("Mouse_fitness_landscape_Combined.pdf", bbox_inches='tight')
     plt.show()
 
-    # --- Plot 2: EGFR Specific ---
+    # EGFR
     plt.figure(figsize=(10, 7))
-    # Zooming in on EGFR cluster
     x_egfr = np.linspace(-1.5, 3.5, 100)
     y_egfr = np.linspace(-3, 1, 100)
     Xe, Ye = np.meshgrid(x_egfr, y_egfr)
@@ -301,7 +268,7 @@ def main():
     plt.savefig("EGFR_Mouse_fitness_landscape.pdf", bbox_inches='tight')
     plt.show()
 
-    # --- Plot 3: G12C Specific ---
+    # G12C
     plt.figure(figsize=(10, 7))
     x_c = np.linspace(-3.5, 1.5, 100)
     y_c = np.linspace(-1.5, 3, 100)
@@ -314,7 +281,7 @@ def main():
     plt.savefig("G12C_Mouse_fitness_landscape.pdf", bbox_inches='tight')
     plt.show()
 
-    # --- Plot 4: G12D Specific ---
+    # G12D
     plt.figure(figsize=(10, 7))
     x_d = np.linspace(-3, 1.5, 100)
     y_d = np.linspace(-1.5, 2.5, 100)
