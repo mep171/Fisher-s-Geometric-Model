@@ -26,7 +26,7 @@ import scipy.stats as stats
 MAX_REGRESS_ITER = 50000 
 NUM_SEEDS = 500
 BASE_SEED = 980
-TARGET_D = 2  
+TARGET_D = 2   
 L2_LAMBDA = 1e-4 
 
 # --- Helper Functions ---
@@ -47,29 +47,28 @@ def calculate_r_squared(observed, predicted, weights=None):
     
     return 1.0 - (ss_res / ss_tot)
 
-def gauge_fix_posthoc(Z, P, anchor_idx, second_anchor_idx=None):
+def gauge_fix_Fixed(Z, P, d):
+    """
+    Fixes the gauge degrees of freedom (translation and rotation)
+    by aligning to the first d coordinates of P.
+    """
     # 1. Translation: Center the mutants (P) at the origin
-    P_mean = np.mean(P, axis=0)
-    P_centered = P - P_mean
-    Z_shifted = Z + P_mean 
+    Pmean = P.mean(axis=0)
+    Pshifted = P - Pmean
+    Zshifted = Z + Pmean  # Z must shift inversely to maintain fitness values
 
-    # 2. Rotation: Align Anchor Mutant to the +X axis
-    anchor = P_centered[anchor_idx]
-    angle = np.arctan2(anchor[1], anchor[0])
+    # 2. Rotation: Align to the first d dimensions
+    M = Pshifted[:d, :d].T
+    Q, R = np.linalg.qr(M)
     
-    cos_a, sin_a = np.cos(-angle), np.sin(-angle)
-    R = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
-
-    P_fixed = P_centered @ R
-    Z_fixed = Z_shifted @ R
-
+    Protated = Pshifted @ Q
+    Zrotated = Zshifted @ Q
+    
     # 3. Reflection: Ensure Y-axis orientation is consistent
-    if second_anchor_idx is None:
-        second_anchor_idx = np.argmax(np.abs(P_fixed[:, 1]))
-    
-    if P_fixed[second_anchor_idx, 1] < 0:
-        P_fixed[:, 1] = -P_fixed[:, 1]
-        Z_fixed[:, 1] = -Z_fixed[:, 1]
+    signs = np.sign(np.diag(Protated))
+    S = np.diag(signs)
+    P_fixed = Protated @ S
+    Z_fixed = Zrotated @ S
 
     return Z_fixed, P_fixed
 
@@ -165,7 +164,7 @@ def main():
     prob_obj = RegressionProblem(ls_obj, observed, norm)
     solver = jaxopt.ScipyMinimize(method="L-BFGS-B", fun=prob_obj.loss_function, maxiter=MAX_REGRESS_ITER)
 
-    results_list, P_best_runs, Z_best_runs = [], [], []
+    results_list = []
     best_loss = float('inf')
     fP_best = None
     fZ_best = None
@@ -193,15 +192,19 @@ def main():
 
     print(f"Optimization complete. Best Loss: {best_loss:.4f}")
 
+    # --- Apply Gauge Fixing ---
+    fZ_fixed, fP_fixed = gauge_fix_Fixed(np.array(fZ_best), np.array(fP_best), TARGET_D)
+
     # --- Analysis of Dimension Differences ---
-    # We use fP_best which is the mutant position matrix (M x 2)
+    # We use fP_fixed which is the fixed mutant position matrix (M x 2)
     
     # 1. Absolute magnitude of effects per mutant for each dimension
-    dim1_abs = np.abs(fP_best[:, 0])
-    dim2_abs = np.abs(fP_best[:, 1])
+    dim1_abs = np.abs(fP_fixed[:, 0])
+    dim2_abs = np.abs(fP_fixed[:, 1])
 
     # 2. Absolute difference between the effect in Dimension 1 and Dimension 2
     diff_between_dims = np.abs(dim1_abs - dim2_abs)
+    
     # Create a Summary DataFrame
     summary_df = pd.DataFrame({
         'Gene': AllMice['gene'],
@@ -214,12 +217,12 @@ def main():
     print(summary_df)
     print(f"\nAverage Absolute Difference across all mutations: {np.mean(diff_between_dims):.4f}")
     
-    # Statistics for Best Fit
-    MicePredFitBest = ls_obj.calculate_fitness(fZ_best, fP_best, fX_best)
+    # Statistics for Best Fit with Fixed Parameters
+    MicePredFitBest = ls_obj.calculate_fitness(jnp.array(fZ_fixed), jnp.array(fP_fixed), fX_best)
     r2 = r2_score(np.ravel(observed), np.ravel(MicePredFitBest))
     print(f"Model R^2: {r2:.4f}")
 
-    # --- Optional Visualization ---
+    # --- Visualization ---
     plt.figure(figsize=(10, 5))
     plt.bar(summary_df['Gene'][:15], summary_df['Abs_Difference'][:15])
     plt.xticks(rotation=45)
