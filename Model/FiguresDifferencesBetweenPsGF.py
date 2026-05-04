@@ -1,13 +1,6 @@
 # -*- coding: utf-8 -*-
 """
 Created on Mon Apr 13 14:25:45 2026
-
-@author: Meaghan Parks
-"""
-
-# -*- coding: utf-8 -*-
-"""
-Created on Mon Apr 13 14:25:45 2026
 @author: Meaghan Parks
 """
 
