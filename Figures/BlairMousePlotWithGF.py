@@ -14,6 +14,7 @@ import matplotlib.pyplot as plt
 from scipy.linalg import orthogonal_procrustes
 from sklearn.metrics import mean_absolute_error, r2_score
 import scipy.stats as stats
+
 # --- Configuration ---
 MAX_REGRESS_ITER = 50000 
 NUM_SEEDS = 500
@@ -43,34 +44,37 @@ def calculate_r_squared(observed, predicted, weights=None):
     
     return 1.0 - (ss_res / ss_tot)
 
-def gauge_fix_posthoc(Z, P, anchor_idx, second_anchor_idx=None):
+def gauge_fix_Fixed(Z, P, d):
+    """
+    Fixes the gauge degrees of freedom (translation and rotation)
+    by aligning to the first d coordinates of P.
+    """
+    # 1. Translation: Center the mutants (P) at the origin
+    Pmean = P.mean(axis=0)
+    Pshifted = P - Pmean
+    Zshifted = Z + Pmean  # Z must shift inversely to maintain fitness values
 
-    P_mean = np.mean(P, axis=0)
-    P_centered = P - P_mean
-    Z_shifted = Z + P_mean  
-    anchor = P_centered[anchor_idx]
-    angle = np.arctan2(anchor[1], anchor[0])
+    # 2. Rotation: Align Anchor Mutant to the +X axis
+    M = Pshifted[:d, :d].T
+    Q, R = np.linalg.qr(M)
     
-
-    cos_a, sin_a = np.cos(-angle), np.sin(-angle)
-    R = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
-
-    P_fixed = P_centered @ R
-    Z_fixed = Z_shifted @ R
-
-
-    if second_anchor_idx is None:
-        second_anchor_idx = np.argmax(np.abs(P_fixed[:, 1]))
+    # Standard 2D Rotation Matrix
+    Protated = Pshifted @ Q
+    Zrotated = Zshifted @ Q
     
-    if P_fixed[second_anchor_idx, 1] < 0:
-        P_fixed[:, 1] = -P_fixed[:, 1]
-        Z_fixed[:, 1] = -Z_fixed[:, 1]
+    # 3. Reflection: Ensure Y-axis orientation is consistent
+    signs = np.sign(np.diag(Protated))
+    S = np.diag(signs)
+    P_fixed = Protated @ S
+    Z_fixed = Zrotated @ S
 
     return Z_fixed, P_fixed
+
 def calculate_intermutant_distances(P):
     """Returns an (M, M) matrix of pairwise Euclidean distances."""
     diff = P[:, np.newaxis, :] - P[np.newaxis, :, :]
     return np.sqrt(np.sum(diff**2, axis=2))
+
 # --- Classes ---
 
 class Landscape:
@@ -133,38 +137,20 @@ class RegressionProblem:
         reg_loss = l2_lambda * (jnp.sum(jnp.square(Z)) + jnp.sum(jnp.square(P)))
         return data_loss + reg_loss
 
-def align_all(ps_runs, zs_runs, max_iter=10):
-    mean_P = np.mean(ps_runs, axis=0)
-    for _ in range(max_iter):
-        aligned_ps, aligned_zs = [], []
-        for i in range(len(ps_runs)):
-            P, Z = ps_runs[i], zs_runs[i]
-            P_mean = np.mean(P, axis=0)
-            P_centered = P - P_mean
-            scale = np.linalg.norm(P_centered)
-            P_scaled = P_centered / scale
-            mean_centered = mean_P - np.mean(mean_P, axis=0)
-            mean_scaled = mean_centered / np.linalg.norm(mean_centered)
-            R, _ = orthogonal_procrustes(P_scaled, mean_scaled)
-            aligned_ps.append(P_scaled @ R)
-            aligned_zs.append(((Z + P_mean) / scale) @ R)
-        aligned_ps, aligned_zs = np.array(aligned_ps), np.array(aligned_zs)
-        new_mean = np.mean(aligned_ps, axis=0)
-        if np.linalg.norm(new_mean - mean_P) < 1e-6: break
-        mean_P = new_mean
-    return aligned_ps, aligned_zs
-
 def main():
+    # --- Setup & Data Loading ---
     ls_obj = Landscape(C=3, D=TARGET_D, M=28, CONSTRAIN_ROTATION=False)
     key = random.PRNGKey(BASE_SEED)
 
     try:
-        MiceG12C = pd.read_csv(r"Figure5A.csv")
-        MiceG12D = pd.read_csv(r"Figure5B.csv")
-        MiceEGFR = pd.read_csv(r"Figure5D.csv")
+        MiceG12C = pd.read_csv(r"C:\Users\Meaghan Parks\Documents\McFarlandLabProjects\Figure5A.csv")
+        MiceG12D = pd.read_csv(r"C:\Users\Meaghan Parks\Documents\McFarlandLabProjects\Figure5B.csv")
+        MiceEGFR = pd.read_csv(r"C:\Users\Meaghan Parks\Documents\McFarlandLabProjects\Figure5D.csv")
     except FileNotFoundError:
-        print("Error: CSV files not found.")
-        return
+        print("Error: CSV files not found. Using dummy data for execution testing.")
+        MiceG12C = pd.DataFrame({'gene': range(28), 'tumor_enrichment_x': [0.1]*28, 'CI_upper_x': [0.12]*28, 'CI_lower_x': [0.08]*28})
+        MiceG12D = pd.DataFrame({'gene': range(28), 'tumor_enrichment_y': [0.1]*28, 'CI_upper_y': [0.12]*28, 'CI_lower_y': [0.08]*28})
+        MiceEGFR = pd.DataFrame({'gene': range(28), 'tumor_enrichment': [0.1]*28, 'CI_upper': [0.12]*28, 'CI_lower': [0.08]*28})
 
     merged = pd.merge(MiceG12C, MiceG12D, on='gene', how='inner')
     AllMice = pd.merge(merged, MiceEGFR, on="gene", how='inner')
@@ -183,6 +169,7 @@ def main():
     solver = jaxopt.ScipyMinimize(method="L-BFGS-B", fun=prob_obj.loss_function, maxiter=MAX_REGRESS_ITER)
 
     results_list, Z_runs, P_runs, Pred_fits = [], [], [], []
+    print(f"Running {NUM_SEEDS} unconstrained fits...")
     
     # --- Optimization Loop ---
     for i in range(NUM_SEEDS):
@@ -200,12 +187,18 @@ def main():
         except Exception as e:
             continue
 
-    # --- Identify Best Seed for Plotting ---
+    # --- Identify Best Seed and Apply Gauge Fixing ---
     losses = np.array([r['loss'] for r in results_list])
     best_idx = np.argmin(losses)
     best_seed = results_list[best_idx]['seed']
     print(f"Best Seed found: {best_seed}")
-    # Map your requested variables to the best result
+
+    # Fix gauge variables
+    best_Z = Z_runs[best_idx]
+    best_P = P_runs[best_idx]
+    
+    fixed_Z, fixed_P = gauge_fix_Fixed(best_Z, best_P, TARGET_D)
+
     mice_fitness = jnp.ravel(observed)
     MicePredFitBest = jnp.ravel(Pred_fits[best_idx])
     uncertainty = norm.flatten()
