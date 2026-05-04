@@ -15,7 +15,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 
-
+# --- Configuration & Constants ---
 MAX_REGRESS_ITER = 10000
 L2_LAMBDA = 1e-5
 C_VAL = 20
@@ -28,22 +28,38 @@ D_GUESS_VALUES = [1, 2, 3, 4, 5]
 SEED_SIM = 90
 SEED_GUESS_LIST = [980]
 
+# --- Helper Functions ---
 
-def gauge_fix_posthoc(Z_pred, P_pred, Z_ref, P_ref):
-    P_mean = np.mean(P_pred, axis=0)
-    P_centered = P_pred - P_mean
-    Z_shifted = Z_pred + P_mean
+def gauge_fix_Fixed(Z, P, d):
+    """
+    Fixes the gauge degrees of freedom (translation and rotation)
+    by aligning to the first d coordinates of P.
+    """
+    # 1. Translation: Center the mutants (P) at the origin
+    Pmean = P.mean(axis=0)
+    Pshifted = P - Pmean
+    Zshifted = Z + Pmean  # Z must shift inversely to maintain fitness values
 
-    A = np.vstack([Z_shifted, P_centered])
-    B = np.vstack([Z_ref, P_ref])
+    # 2. Rotation: Align to the first d dimensions
+    M = Pshifted[:d, :d].T
+    Q, R = np.linalg.qr(M)
     
-    M = A.T @ B
-    U, S, Vt = np.linalg.svd(M)
-    R = U @ Vt
+    Protated = Pshifted @ Q
+    Zrotated = Zshifted @ Q
     
-    return Z_shifted @ R, P_centered @ R
+    # 3. Reflection: Ensure Y-axis orientation is consistent
+    signs = np.sign(np.diag(Protated))
+    S = np.diag(signs)
+    P_fixed = Protated @ S
+    Z_fixed = Zrotated @ S
+
+    return Z_fixed, P_fixed
 
 def calculate_stable_bic(mse, n_samples, k_eff):
+    """
+    Calculates BIC using the MSE-based log-likelihood to prevent 
+    penalty term dominance.
+    """
     return n_samples * np.log(mse + 1e-10) + k_eff * np.log(n_samples)
 
 # --- Classes ---
@@ -105,6 +121,7 @@ def save_individual_plots(results_list):
     D_true_vals = sorted(df['True_Dimension'].unique())
     colors = plt.cm.plasma(np.linspace(0, 0.9, len(D_true_vals)))
 
+    # FIGURE 1: R2 Score
     plt.figure(figsize=(9, 7))
     for i, dt in enumerate(D_true_vals):
         sub = df[df['True_Dimension'] == dt]
@@ -119,6 +136,7 @@ def save_individual_plots(results_list):
     plt.savefig("R2_Score_Analysis.pdf", dpi=300)
     plt.show()
 
+    # FIGURE 2: BIC Score
     plt.figure(figsize=(9, 7))
     for i, dt in enumerate(D_true_vals):
         sub = df[df['True_Dimension'] == dt]
@@ -133,6 +151,7 @@ def save_individual_plots(results_list):
     plt.savefig("BIC_Score_Analysis.pdf", dpi=300)
     plt.show()
 
+# --- Main Execution ---
 
 def main():
     key_sim = random.PRNGKey(SEED_SIM)
@@ -157,13 +176,17 @@ def main():
                 params, _ = regress_LBFGS(prob, gZ, gP, GUESS_X)
                 rZ, rP, rX = prob.reconstruct_ZP(params)
                 
+
+                rZ_fixed, rP_fixed = gauge_fix_Fixed(rZ, rP, d=D_guess)
                 
-                pred_fit = ls_guess.calculate_fitness(rZ, rP, rX)
+
+                pred_fit = ls_guess.calculate_fitness(rZ_fixed, rP_fixed, rX)
                 mse = float(jnp.mean((sim_fit - pred_fit) ** 2))
                 
                 ss_res = jnp.sum((sim_fit - pred_fit) ** 2)
                 ss_tot = jnp.sum((sim_fit - jnp.mean(sim_fit)) ** 2)
                 r2 = float(1 - (ss_res / ss_tot))
+
 
                 n_params = len(params)
                 constraints = (D_guess * (D_guess + 1)) // 2
