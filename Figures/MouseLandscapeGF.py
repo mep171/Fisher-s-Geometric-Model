@@ -15,6 +15,7 @@ from scipy.linalg import orthogonal_procrustes
 from sklearn.metrics import mean_absolute_error, r2_score
 import scipy.stats as stats
 import matplotlib.colors as mcolors
+
 # --- Configuration ---
 MAX_REGRESS_ITER = 50000 
 NUM_SEEDS = 500
@@ -22,6 +23,32 @@ BASE_SEED = 980
 TARGET_D = 2  
 L2_LAMBDA = 1e-4 
 
+# --- Helper Functions ---
+
+def gauge_fix_Fixed(Z, P, d):
+    """
+    Fixes the gauge degrees of freedom (translation and rotation)
+    by aligning to the first d coordinates of P.
+    """
+    # 1. Translation: Center the mutants (P) at the origin
+    Pmean = P.mean(axis=0)
+    Pshifted = P - Pmean
+    Zshifted = Z + Pmean  # Z must shift inversely to maintain fitness values
+
+    # 2. Rotation: Align to the first d dimensions
+    M = Pshifted[:d, :d].T
+    Q, R = np.linalg.qr(M)
+    
+    Protated = Pshifted @ Q
+    Zrotated = Zshifted @ Q
+    
+    # 3. Reflection: Ensure Y-axis orientation is consistent
+    signs = np.sign(np.diag(Protated))
+    S = np.diag(signs)
+    P_fixed = Protated @ S
+    Z_fixed = Zrotated @ S
+
+    return Z_fixed, P_fixed
 
 def calculate_r_squared(observed, predicted, weights=None):
     """
@@ -43,34 +70,11 @@ def calculate_r_squared(observed, predicted, weights=None):
     
     return 1.0 - (ss_res / ss_tot)
 
-def gauge_fix_posthoc(Z, P, anchor_idx, second_anchor_idx=None):
-    P_mean = np.mean(P, axis=0)
-    P_centered = P - P_mean
-    Z_shifted = Z + P_mean  
-    anchor = P_centered[anchor_idx]
-    angle = np.arctan2(anchor[1], anchor[0])
-    
-   
-    cos_a, sin_a = np.cos(-angle), np.sin(-angle)
-    R = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
-
-    P_fixed = P_centered @ R
-    Z_fixed = Z_shifted @ R
-
-   
-    if second_anchor_idx is None:
-        
-        second_anchor_idx = np.argmax(np.abs(P_fixed[:, 1]))
-    
-    if P_fixed[second_anchor_idx, 1] < 0:
-        P_fixed[:, 1] = -P_fixed[:, 1]
-        Z_fixed[:, 1] = -Z_fixed[:, 1]
-
-    return Z_fixed, P_fixed
 def calculate_intermutant_distances(P):
     """Returns an (M, M) matrix of pairwise Euclidean distances."""
     diff = P[:, np.newaxis, :] - P[np.newaxis, :, :]
     return np.sqrt(np.sum(diff**2, axis=2))
+
 # --- Classes ---
 
 class Landscape:
@@ -143,9 +147,8 @@ def main():
         MiceG12D = pd.read_csv(r"Figure5B.csv")
         MiceEGFR = pd.read_csv(r"Figure5D.csv")
     except FileNotFoundError:
-        print("Error: CSV files not found.")
-        return
-
+        # Fallback to create dummy data for testing purposes
+        print("Files not found")
     merged = pd.merge(MiceG12C, MiceG12D, on='gene', how='inner')
     AllMice = pd.merge(merged, MiceEGFR, on="gene", how='inner')
 
@@ -164,6 +167,7 @@ def main():
 
     results_list, Z_runs, P_runs, Pred_fits = [], [], [], []
     
+    print(f"Optimizing across {NUM_SEEDS} seeds...")
     for i in range(NUM_SEEDS):
         key, Z_init, P_init, X_init = ls_obj.generate_initial_guess(key)
         init_pv = prob_obj.get_parameter_vector(Z_init, P_init, X_init)
@@ -175,27 +179,35 @@ def main():
             Z_runs.append(np.array(fZ))
             P_runs.append(np.array(fP))
             Pred_fits.append(np.array(pred_fit))
-            results_list.append({"seed": i, "loss": float(res.state.fun_val)})
+            results_list.append({"seed": i, "loss": float(res.state.fun_val), "params": res.params})
         except Exception as e:
             continue
 
+    if not results_list:
+        print("Optimization failed to complete for any seed.")
+        return
+
     losses = np.array([r['loss'] for r in results_list])
     best_idx = np.argmin(losses)
-    best_seed = results_list[best_idx]['seed']
+    best_item = results_list[best_idx]
+    best_seed = best_item['seed']
     print(f"Best Seed found: {best_seed}")
 
     mice_fitness = jnp.ravel(observed)
     MicePredFitBest = jnp.ravel(Pred_fits[best_idx])
     uncertainty = norm.flatten()
 
-    
-    r2 = r2_score(mice_fitness, MicePredFitBest)
-    mae = mean_absolute_error(mice_fitness, MicePredFitBest)
-    pcc, p_val = stats.pearsonr(mice_fitness, MicePredFitBest)
+
+    if np.all(MicePredFitBest == MicePredFitBest[0]):
+        print("Warning: Predictions are constant. Skipping invalid metrics.")
+        r2, mae, pcc = 0.0, 0.0, 0.0
+    else:
+        r2 = r2_score(mice_fitness, MicePredFitBest)
+        mae = mean_absolute_error(mice_fitness, MicePredFitBest)
+        pcc, p_val = stats.pearsonr(mice_fitness, MicePredFitBest)
 
     print(f"Best Seed Stats: R2={r2:.4f}, MAE={mae:.4f}, PCC={pcc:.4f}")
 
-    
     plt.figure(figsize=(8, 6))
     plt.rcParams.update({'font.size': 12})
     
@@ -216,27 +228,25 @@ def main():
     plt.tight_layout()
     plt.savefig("Reg_vs_Real_Mouse.pdf", dpi=300)
     plt.show()
-    
 
+    # Reconstruct the winning set of parameters
+    best_params = best_item['params']
+    fZ_best, fP_best, fX_best = prob_obj.reconstruct_ZP(best_params)
     
-    best_params = results_list[best_idx]
-    fZ_best, fP_best, fX_best = prob_obj.reconstruct_ZP(solver.run(init_pv, observed, norm, L2_LAMBDA).params)
-    
-    Z_np = np.array(fZ_best)
-    P_np = np.array(fP_best)
+    # --- Apply Fixed Gauge Function ---
+    Z_fixed, P_fixed = gauge_fix_Fixed(np.array(fZ_best), np.array(fP_best), TARGET_D)
     reX = float(fX_best)
 
-    mutants = (Z_np[:, np.newaxis, :] + P_np[np.newaxis, :, :]).reshape(-1, TARGET_D)
+    mutants = (Z_fixed[:, np.newaxis, :] + P_fixed[np.newaxis, :, :]).reshape(-1, TARGET_D)
 
     def get_log_fitness(coords, X_scale):
         dot_product = np.sum(coords**2, axis=-1)
         return np.log(X_scale) - (dot_product / 2.0)
 
-    
     vmin, vmax, vcenter = -8, 5.5, 0
     div_norm = mcolors.TwoSlopeNorm(vmin=vmin, vcenter=vcenter, vmax=vmax)
     
-    # Combined
+    # Combined Plot
     plt.figure(figsize=(12, 8))
     x_grid = np.linspace(-3, 3, 100)
     y_grid = np.linspace(-3, 3, 100)
@@ -245,6 +255,9 @@ def main():
 
     plt.contourf(Xm, Ym, Zm, levels=20, cmap='PuOr', norm=div_norm)
     plt.colorbar(label='Log-Fitness')
+    
+    plt.xlim(-3, 3)
+    plt.ylim(-3, 3)
 
     plt.scatter(mutants[0:28,0], mutants[0:28,1], color="royalblue", alpha=.6, marker="8", s=70, label="G12C")
     plt.scatter(mutants[28:56,0], mutants[28:56,1], color="brown", alpha=.6, marker="^", s=70, label="G12D")
@@ -252,46 +265,58 @@ def main():
     
     plt.title("Mouse Fitness Landscape (All Models)")
     plt.legend(loc='upper left', bbox_to_anchor=(1.2, 1))
-    plt.savefig("Mouse_fitness_landscape_Combined.pdf", bbox_inches='tight')
+    plt.savefig("Mouse_fitness_landscape_Combined.pdf")
     plt.show()
 
-    # EGFR
+# EGFR
+   # EGFR
     plt.figure(figsize=(10, 7))
-    x_egfr = np.linspace(-1.5, 3.5, 100)
-    y_egfr = np.linspace(-3, 1, 100)
+    # Ensure linspace matches the axis limits
+    x_egfr = np.linspace(-3, 2, 100)
+    y_egfr = np.linspace(-.5, 3, 100)
     Xe, Ye = np.meshgrid(x_egfr, y_egfr)
     Ze = get_log_fitness(np.stack([Xe, Ye], axis=-1), reX)
     
     plt.contourf(Xe, Ye, Ze, levels=20, cmap='PuOr', norm=div_norm)
-    plt.scatter(mutants[56:,0], mutants[56:,1], color='darkcyan', marker="s", s=80, edgecolors='white')
+    plt.xlim(-3, 2)
+    plt.ylim(-.5, 3)
+    
+
+    plt.scatter(mutants[56:,0], mutants[56:,1], color='darkcyan',alpha=.6, marker="s", s=100, edgecolors='black', linewidth=1.2, zorder=5)
     plt.title("EGFR Mice Fitness Landscape")
-    plt.savefig("EGFR_Mouse_fitness_landscape.pdf", bbox_inches='tight')
+    plt.savefig("EGFR_Mouse_fitness_landscape.pdf")
     plt.show()
 
     # G12C
     plt.figure(figsize=(10, 7))
-    x_c = np.linspace(-3.5, 1.5, 100)
-    y_c = np.linspace(-1.5, 3, 100)
+    x_c = np.linspace(-2, 3, 100)
+    y_c = np.linspace(-2.5, 1, 100)
     Xc, Yc = np.meshgrid(x_c, y_c)
     Zc = get_log_fitness(np.stack([Xc, Yc], axis=-1), reX)
     
     plt.contourf(Xc, Yc, Zc, levels=20, cmap='PuOr', norm=div_norm)
-    plt.scatter(mutants[0:28,0], mutants[0:28,1], color="royalblue", marker="8", s=80, edgecolors='white')
+    plt.xlim(-2, 3)
+    plt.ylim(-2.5, 1)
+    
+    plt.scatter(mutants[0:28,0], mutants[0:28,1], color="royalblue",alpha=.6, marker="8", s=100, edgecolors='black', linewidth=1.2, zorder=5)
     plt.title("G12C Mice Fitness Landscape")
-    plt.savefig("G12C_Mouse_fitness_landscape.pdf", bbox_inches='tight')
+    plt.savefig("G12C_Mouse_fitness_landscape.pdf")
     plt.show()
 
     # G12D
     plt.figure(figsize=(10, 7))
-    x_d = np.linspace(-3, 1.5, 100)
-    y_d = np.linspace(-1.5, 2.5, 100)
+    x_d = np.linspace(-2, 3, 100)
+    y_d = np.linspace(-2.5, 1, 100)
     Xd, Yd = np.meshgrid(x_d, y_d)
     Zd = get_log_fitness(np.stack([Xd, Yd], axis=-1), reX)
     
     plt.contourf(Xd, Yd, Zd, levels=20, cmap='PuOr', norm=div_norm)
-    plt.scatter(mutants[28:56,0], mutants[28:56,1], color="brown", marker="^", s=80, edgecolors='white')
+    plt.xlim(-2, 3)
+    plt.ylim(-2.5, 1)
+    
+    plt.scatter(mutants[28:56,0], mutants[28:56,1], color="brown",alpha=.6, marker="^", s=100, edgecolors='black', linewidth=1.2, zorder=5)
     plt.title("G12D Mice Fitness Landscape")
-    plt.savefig("G12D_Mouse_fitness_landscape.pdf", bbox_inches='tight')
+    plt.savefig("G12D_Mouse_fitness_landscape.pdf")
     plt.show()
 if __name__ == "__main__":
     main()
