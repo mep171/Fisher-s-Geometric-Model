@@ -132,11 +132,11 @@ def main():
     ls_obj = Landscape(C=3, D=TARGET_D, M=28, CONSTRAIN_ROTATION=False)
     key = random.PRNGKey(BASE_SEED)
 
-    # Note: Ensure these paths are correct for your local machine
+    
     try:
-        MiceG12C = pd.read_csv(r"C:\Users\Meaghan Parks\Documents\McFarlandLabProjects\Figure5A.csv")
-        MiceG12D = pd.read_csv(r"C:\Users\Meaghan Parks\Documents\McFarlandLabProjects\Figure5B.csv")
-        MiceEGFR = pd.read_csv(r"C:\Users\Meaghan Parks\Documents\McFarlandLabProjects\Figure5D.csv")
+        MiceG12C = pd.read_csv(r"Figure5A.csv")
+        MiceG12D = pd.read_csv(r"Figure5B.csv")
+        MiceEGFR = pd.read_csv(r"Figure5D.csv")
     except FileNotFoundError:
         print("Error: CSV files not found. Please check your file paths.")
         return
@@ -188,17 +188,12 @@ def main():
     # --- Apply Gauge Fixing ---
     fZ_fixed, fP_fixed = gauge_fix_Fixed(np.array(fZ_best), np.array(fP_best), TARGET_D)
 
-    # --- Analysis of Dimension Differences ---
-    # We use fP_fixed which is the fixed mutant position matrix (M x 2)
-    
-    # 1. Absolute magnitude of effects per mutant for each dimension
+
     dim1_abs = np.abs(fP_fixed[:, 0])
     dim2_abs = np.abs(fP_fixed[:, 1])
 
-    # 2. Absolute difference between the effect in Dimension 1 and Dimension 2
     diff_between_dims = np.abs(dim1_abs - dim2_abs)
-    
-    # Create a Summary DataFrame
+
     summary_df = pd.DataFrame({
         'Gene': AllMice['gene'],
         'Dim1_Effect': dim1_abs,
@@ -210,12 +205,11 @@ def main():
     print(summary_df)
     print(f"\nAverage Absolute Difference across all mutations: {np.mean(diff_between_dims):.4f}")
     
-    # Statistics for Best Fit with Fixed Parameters
+
     MicePredFitBest = ls_obj.calculate_fitness(jnp.array(fZ_fixed), jnp.array(fP_fixed), fX_best)
     r2 = r2_score(np.ravel(observed), np.ravel(MicePredFitBest))
     print(f"Model R^2: {r2:.4f}")
 
-    # --- Visualization ---
     plt.figure(figsize=(10, 5))
     plt.bar(summary_df['Gene'][:15], summary_df['Abs_Difference'][:15])
     plt.xticks(rotation=45)
