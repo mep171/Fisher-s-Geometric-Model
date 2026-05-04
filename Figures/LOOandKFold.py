@@ -20,7 +20,7 @@ import seaborn as sns
 # --- Configuration ---
 MAX_REGRESS_ITER = 50000 
 BASE_SEED = 404
-TARGET_D = 2  
+TARGET_D = 2   
 L2_LAMBDA = 1e-4 
 
 # --- Robust Helper Functions ---
@@ -104,6 +104,33 @@ class RegressionProblem:
         reg_loss = l2_lambda * (jnp.sum(jnp.square(Z)) + jnp.sum(jnp.square(P)))
         return data_loss + reg_loss
 
+# --- Gauge Fixing Function ---
+
+def gauge_fix_Fixed(Z, P, d):
+    """
+    Fixes the gauge degrees of freedom (translation and rotation)
+    by aligning to the first d coordinates of P.
+    """
+    # 1. Translation: Center the mutants (P) at the origin
+    Pmean = P.mean(axis=0)
+    Pshifted = P - Pmean
+    Zshifted = Z + Pmean  # Z must shift inversely to maintain fitness values
+
+    # 2. Rotation: Align to the first d dimensions
+    M = Pshifted[:d, :d].T
+    Q, R = np.linalg.qr(M)
+    
+    Protated = Pshifted @ Q
+    Zrotated = Zshifted @ Q
+    
+    # 3. Reflection: Ensure Y-axis orientation is consistent
+    signs = np.sign(np.diag(Protated))
+    S = np.diag(signs)
+    P_fixed = Protated @ S
+    Z_fixed = Zrotated @ S
+
+    return Z_fixed, P_fixed
+
 # --- Data Loading ---
 MiceG12C = pd.read_csv(r"Figure5A.csv")
 MiceG12D = pd.read_csv(r"Figure5B.csv")
@@ -147,7 +174,10 @@ init_pv = prob_obj.get_parameter_vector(Z_emp, P_emp, 1.0)
 global_res = solver.run(init_pv, observed, norm, L2_LAMBDA, jnp.ones_like(observed))
 
 Pred_Z, Pred_P, Pred_X = prob_obj.reconstruct_ZP(global_res.params)
-pred_global = ls_obj.calculate_fitness(Pred_Z, Pred_P, Pred_X)
+
+# Apply Gauge Fixing
+Pred_Z_fixed, Pred_P_fixed = gauge_fix_Fixed(np.array(Pred_Z), np.array(Pred_P), TARGET_D)
+pred_global = ls_obj.calculate_fitness(jnp.array(Pred_Z_fixed), jnp.array(Pred_P_fixed), Pred_X)
 
 # Robust Metrics
 r2_global, pcc_global = robust_metrics(observed, pred_global)
@@ -183,7 +213,11 @@ def run_5fold_cv_empirical(prob_obj, solver, observed, norm, l2_lambda, k=5):
         
         res = solver.run(fold_init_pv, observed, norm, l2_lambda, mask)
         Z_cv, P_cv, X_cv = prob_obj.reconstruct_ZP(res.params)
-        pred_full = ls_obj.calculate_fitness(Z_cv, P_cv, X_cv)
+        
+        # Apply Gauge Fixing
+        Z_cv_fixed, P_cv_fixed = gauge_fix_Fixed(np.array(Z_cv), np.array(P_cv), TARGET_D)
+        
+        pred_full = ls_obj.calculate_fitness(jnp.array(Z_cv_fixed), jnp.array(P_cv_fixed), X_cv)
         
         test_mask = np.zeros(total_points)
         test_mask[test_indices] = 1.0
@@ -237,7 +271,6 @@ non_r, non_p = pearsonr(non_egfr_df['Observed'][mask_non], non_egfr_df['Predicte
 plt.figure(figsize=(10, 9))
 sns.set_style("white")
 
-
 palette = {'G12C': '#72a2c9', 'G12D': '#d96a6a', 'EGFR': '#76bf77'}
 
 scatter = sns.scatterplot(
@@ -245,10 +278,8 @@ scatter = sns.scatterplot(
     palette=palette, s=80, alpha=0.8, edgecolor='w', linewidth=0.5
 )
 
-
 lims = [min(plt.xlim()[0], plt.ylim()[0]), max(plt.xlim()[1], plt.ylim()[1])]
 plt.plot(lims, lims, color='gray', linestyle='--', alpha=0.8, zorder=0, label='Identity Line')
-
 
 stats_text = (
     f"Global Pearson r: {glob_r:.4f}\n"
@@ -265,14 +296,10 @@ plt.text(
     bbox=dict(boxstyle='square,pad=0.5', facecolor='white', alpha=0.5, edgecolor='gray')
 )
 
-
 plt.title("5-Fold Cross-Validation: Global vs. Non-EGFR Performance", fontsize=15)
 plt.xlabel("Measured Log Fitness", fontsize=13)
 plt.ylabel("Predicted Log Fitness", fontsize=13)
-
-
 plt.legend(loc='lower right', frameon=True, fontsize=11)
-
 plt.tight_layout()
 plt.savefig("CV5AverageStart.pdf", dpi=300)
 plt.show()
@@ -280,7 +307,6 @@ plt.show()
 def run_half_leave_out_cv(prob_obj, solver, observed, norm, l2_lambda):
     n_conditions, n_mutants = observed.shape
     cv_predictions = np.full_like(observed, np.nan) # Initialize with NaNs
-    
     
     n_splits = 2
     indices = np.arange(n_mutants)
@@ -292,8 +318,6 @@ def run_half_leave_out_cv(prob_obj, solver, observed, norm, l2_lambda):
         for fold_idx in range(n_splits):
             
             mask = np.ones((n_conditions, n_mutants))
-            
-            
             test_gene_indices = gene_folds[fold_idx]
             
             mask[cond_idx, test_gene_indices] = 0.0
@@ -309,11 +333,14 @@ def run_half_leave_out_cv(prob_obj, solver, observed, norm, l2_lambda):
                 jnp.tile(p_fold.T, (1, TARGET_D)), 
                 1.0
             )
-            
 
             res = solver.run(fold_init_pv, observed, norm, l2_lambda, mask_jax)
             Z_cv, P_cv, X_cv = prob_obj.reconstruct_ZP(res.params)
-            pred_full = ls_obj.calculate_fitness(Z_cv, P_cv, X_cv)
+            
+            # Apply Gauge Fixing
+            Z_cv_fixed, P_cv_fixed = gauge_fix_Fixed(np.array(Z_cv), np.array(P_cv), TARGET_D)
+            
+            pred_full = ls_obj.calculate_fitness(jnp.array(Z_cv_fixed), jnp.array(P_cv_fixed), X_cv)
 
             cv_predictions[cond_idx, test_gene_indices] = pred_full[cond_idx, test_gene_indices]
             
@@ -321,17 +348,13 @@ def run_half_leave_out_cv(prob_obj, solver, observed, norm, l2_lambda):
         
     return cv_predictions
 
-
 pred_half_cv = run_half_leave_out_cv(prob_obj, solver, observed, norm, L2_LAMBDA)
 
-
 residuals = np.array(observed) - pred_half_cv
-
 
 plt.figure(figsize=(16, 6))
 gene_names = AllMice['gene'].values
 condition_names = ['G12C', 'G12D', 'EGFR']
-
 
 sns.heatmap(residuals, 
             xticklabels=gene_names, 
@@ -347,52 +370,38 @@ plt.xticks(rotation=45, ha='right')
 plt.tight_layout()
 plt.show()
 
-
-
 print("\n" + "="*40)
 print("PER-CONDITION STATISTICAL SUMMARY")
 print("="*40)
 
 condition_pccs = []
 condition_pvals = []
-condition_names = ['G12C', 'G12D', 'EGFR']
 
 for i in range(len(condition_names)):
-   
     y_true = np.ravel(observed[i, :])
     y_pred = np.ravel(pred_half_cv[i, :])
-    
     
     mask = np.isfinite(y_true) & np.isfinite(y_pred)
     y_true_clean = y_true[mask]
     y_pred_clean = y_pred[mask]
     
     if len(y_true_clean) > 1:
-       
         pcc_val, p_val = pearsonr(y_true_clean, y_pred_clean)
-        
         condition_pccs.append(pcc_val)
         condition_pvals.append(p_val)
-        
-        
         print(f"{condition_names[i]:<6} | PCC: {pcc_val:.4f} | P-value: {p_val:.2e}")
     else:
         print(f"{condition_names[i]:<6} | Insufficient valid data points.")
-
-
 
 LARGE_FONT = 18
 MEDIUM_FONT = 15
 SMALL_FONT = 12
 
-
 residuals = np.array(observed) - pred_half_cv
-
 
 fig, ax = plt.subplots(figsize=(22, 8)) 
 gene_names = AllMice['gene'].values
 condition_names = ['G12C', 'G12D', 'EGFR']
-
 
 sns.heatmap(residuals, 
             ax=ax,
@@ -406,10 +415,7 @@ sns.heatmap(residuals,
                 'shrink': 0.8    
             })
 
-
 ax.figure.axes[-1].yaxis.label.set_size(MEDIUM_FONT)
-
-# 4. Calculate and Annotate Stats
 
 for i, name in enumerate(condition_names):
     y_true = np.ravel(observed[i, :])
@@ -420,7 +426,6 @@ for i, name in enumerate(condition_names):
         pcc, pval = pearsonr(y_true[mask], y_pred[mask])
         stats_text = f"PCC: {pcc:.3f}\nP: {pval:.2e}"
         
-       
         ax.text(1.12, 1 - (i + 0.5)/len(condition_names), stats_text, 
                 transform=ax.transAxes,
                 va='center', ha='left', fontsize=MEDIUM_FONT, 
@@ -431,15 +436,12 @@ ax.set_title("Leave-Half-Out CV Residual Heatmap", fontsize=LARGE_FONT, pad=30)
 ax.set_xlabel("Mutants (Genes)", fontsize=MEDIUM_FONT, labelpad=15)
 ax.set_ylabel("Conditions (Mice Models)", fontsize=MEDIUM_FONT, labelpad=15)
 
-
 plt.setp(ax.get_xticklabels(), rotation=45, ha='right', fontsize=SMALL_FONT)
 plt.setp(ax.get_yticklabels(), rotation=0, fontsize=MEDIUM_FONT)
 
 plt.tight_layout(rect=[0, 0, 0.85, 1]) 
 plt.savefig("CorrectedStartCV2.pdf",dpi=300)
 plt.show()
-
-
 
 def run_loocv(prob_obj, solver, observed, norm, l2_lambda):
     n_conditions, n_mutants = observed.shape
@@ -448,14 +450,11 @@ def run_loocv(prob_obj, solver, observed, norm, l2_lambda):
     
     print(f"Starting LOOCV for {total_points} total points...")
     
-    
     for c in range(n_conditions):
         for m in range(n_mutants):
-           
             mask = np.ones((n_conditions, n_mutants))
             mask[c, m] = 0.0
             mask_jax = jnp.array(mask)
-            
             
             train_data = jnp.where(mask_jax == 1.0, observed, jnp.nan)
             z_fold = jnp.nan_to_num(-jnp.nanmean(train_data, axis=1, keepdims=True), nan=0.0)
@@ -467,12 +466,13 @@ def run_loocv(prob_obj, solver, observed, norm, l2_lambda):
                 1.0
             )
             
-            
             res = solver.run(fold_init_pv, observed, norm, l2_lambda, mask_jax)
             Z_cv, P_cv, X_cv = prob_obj.reconstruct_ZP(res.params)
             
+            # Apply Gauge Fixing
+            Z_cv_fixed, P_cv_fixed = gauge_fix_Fixed(np.array(Z_cv), np.array(P_cv), TARGET_D)
 
-            pred_full = ls_obj.calculate_fitness(Z_cv, P_cv, X_cv)
+            pred_full = ls_obj.calculate_fitness(jnp.array(Z_cv_fixed), jnp.array(P_cv_fixed), X_cv)
             loocv_predictions[c, m] = pred_full[c, m]
             
         print(f"Condition {condition_names[c]} complete.")
@@ -485,12 +485,9 @@ pred_loocv = run_loocv(prob_obj, solver, observed, norm, L2_LAMBDA)
 # Calculate final metrics
 r2_loocv, pcc_loocv = robust_metrics(observed, pred_loocv)
 
-
 import matplotlib.gridspec as gridspec
 
-
 loocv_residuals = np.array(observed) - pred_loocv
-
 
 fig = plt.figure(figsize=(22, 8))
 gs = gridspec.GridSpec(1, 3, width_ratios=[15, 0.5, 3], wspace=0.1)
@@ -508,7 +505,6 @@ sns.heatmap(loocv_residuals,
             cbar_ax=ax_cbar, 
             cbar_kws={'label': 'Residual (Log Fitness Error)'})
 
-
 ax_text.axis('off') 
 for i, name in enumerate(condition_names):
     y_true = np.ravel(observed[i, :])
@@ -519,7 +515,6 @@ for i, name in enumerate(condition_names):
         pcc, pval = pearsonr(y_true[mask], y_pred[mask])
         stats_text = f"PCC: {pcc:.3f}\nP: {pval:.2e}"
         
-       
         y_pos = 1 - (i + 0.5) / len(condition_names)
         
         ax_text.text(0.1, y_pos, stats_text, 
@@ -528,14 +523,12 @@ for i, name in enumerate(condition_names):
                      fontweight='bold', 
                      bbox=dict(facecolor='white', alpha=0.8, edgecolor='gray'))
 
-
 ax_main.set_title("LOOCV Residual Heatmap: Measured - Predicted", fontsize=18, pad=20)
 ax_main.set_xlabel("Mutants (Genes)", fontsize=15, labelpad=10)
 ax_main.set_ylabel("Conditions (Mice Models)", fontsize=15)
 
 plt.setp(ax_main.get_xticklabels(), rotation=45, ha='right', fontsize=12)
 plt.setp(ax_main.get_yticklabels(), rotation=0, fontsize=14)
-
 
 ax_cbar.yaxis.label.set_size(13)
 plt.savefig("LOOAverage.pdf", dpi=300)
