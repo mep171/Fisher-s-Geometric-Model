@@ -4,8 +4,6 @@ Created on Wed Apr  8 14:07:43 2026
 
 @author: Meaghan Parks
 """
-# -*- coding: utf-8 -*-
-
 
 import jax
 import jax.numpy as jnp
