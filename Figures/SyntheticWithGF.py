@@ -144,7 +144,7 @@ plt.plot(lims, lims, color="black", linestyle="--", linewidth=1)
 # Dynamic text labels
 plt.text(lims[0] + 0.5, lims[1] - 1.0, f"MAE= {mae:.4f}", fontsize=12)
 plt.text(lims[0] + 0.5, lims[1] - 2.0, f"PCC = {pcc:.4f}, p < .00001", fontsize=12)
-plt.text(lims[0] + 0.5, lims[1] - 3.0, f"PCC = {r2:.4f}", fontsize=12)
+plt.text(lims[0] + 0.5, lims[1] - 3.0, f"R2 = {r2:.4f}", fontsize=12)
 
 plt.tight_layout()
 plt.savefig(r"SyntheticFitnessGF.pdf", dpi=300)
