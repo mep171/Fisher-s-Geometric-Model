@@ -123,7 +123,7 @@ Z_final, P_final = gauge_fix_Fixed(best_Z, best_P, TARGET_D)
 # --- 4. Plotting and Metrics ---
 obs_flat = Simulated_fitness.flatten()
 pred_flat = best_preds.flatten()
-
+r2= r2_score(obs_flat,pred_flat)
 mae = mean_absolute_error(obs_flat, pred_flat)
 pcc, p_val = pearsonr(obs_flat, pred_flat)
 
@@ -144,6 +144,7 @@ plt.plot(lims, lims, color="black", linestyle="--", linewidth=1)
 # Dynamic text labels
 plt.text(lims[0] + 0.5, lims[1] - 1.0, f"MAE= {mae:.4f}", fontsize=12)
 plt.text(lims[0] + 0.5, lims[1] - 2.0, f"PCC = {pcc:.4f}, p < .00001", fontsize=12)
+plt.text(lims[0] + 0.5, lims[1] - 3.0, f"PCC = {r2:.4f}", fontsize=12)
 
 plt.tight_layout()
 plt.savefig(r"SyntheticFitnessGF.pdf", dpi=300)
