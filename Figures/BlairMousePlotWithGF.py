@@ -223,7 +223,7 @@ def main():
     # Dynamic text placement based on metrics
     plt.text(np.min(mice_fitness), np.max(MicePredFitBest)-0.3, f"MAE= {mae:.4f}", fontsize=12)
     plt.text(np.min(mice_fitness), np.max(MicePredFitBest)-0.6, f"PCC = {pcc:.4f}, p < .00001", fontsize=12)
-    
+    plt.text(np.min(mice_fitness), np.max(MicePredFitBest)-0.9, f"R2 = {r2:.4f}", fontsize=12)
     plt.colorbar(label='Experimental Uncertainty')
     
     # Identity Line
